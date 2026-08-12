@@ -163,4 +163,17 @@ replace_once(
       messageType: dbMsg.messageType ?? undefined,''',
 )
 
-print("Corrected route-test insertion, source guard, and production types.")
+# The new history tests render real message rows, which mount LinkPreview.
+# Keep that unrelated subsystem disabled in this focused unit-test mock.
+replace_once(
+    "src/components/MeshCore/MeshCoreDirectMessagesView.test.tsx",
+    '''vi.mock('../../contexts/SettingsContext', () => ({
+  useSettings: () => ({ timeFormat: '24', dateFormat: 'MM/DD/YYYY', temperatureUnit: 'F', telemetryVisualizationHours: 48 }),
+}));''',
+    '''vi.mock('../../contexts/SettingsContext', () => ({
+  useSettings: () => ({ timeFormat: '24', dateFormat: 'MM/DD/YYYY', temperatureUnit: 'F', telemetryVisualizationHours: 48 }),
+  useSettingsOptional: () => ({ linkPreviewsEnabled: false }),
+}));''',
+)
+
+print("Corrected route-test insertion, source guard, production types, and test mocks.")
