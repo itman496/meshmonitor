@@ -32,6 +32,9 @@ jobs:
       - name: Apply guarded source and test changes
         run: python3 tools/apply_meshcore_dm_history_fix.py
 
+      - name: Normalize generated test whitespace
+        run: sed -i 's/[[:blank:]]\+$//' src/server/routes/meshcoreRoutes.test.ts
+
       - name: Check patch whitespace
         run: git diff --check
 
