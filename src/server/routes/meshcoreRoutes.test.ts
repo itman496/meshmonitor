@@ -46,6 +46,7 @@ const meshcoreManager = {
   getContact: vi.fn().mockReturnValue(undefined),
   getRecentMessages: vi.fn().mockReturnValue([]),
   getChannelMessages: vi.fn().mockResolvedValue([]),
+  getConversationMessages: vi.fn().mockResolvedValue([]),
   // Message deletion / purge (#3981)
   deleteStoredMessage: vi.fn().mockResolvedValue(true),
   purgeConversation: vi.fn().mockResolvedValue(3),
@@ -329,6 +330,66 @@ describe('MeshCore Routes', () => {
 
   afterAll(() => {
     db.close();
+  });
+
+  describe('GET /api/sources/test-source/meshcore/messages/conversation/:publicKey', () => {
+    const PEER = 'a'.repeat(64);
+
+    beforeEach(() => {
+      meshcoreManager.getConversationMessages.mockReset();
+      meshcoreManager.getConversationMessages.mockResolvedValue([]);
+    });
+
+    it('returns a paginated persisted DM page and hasMore', async () => {
+      meshcoreManager.getConversationMessages.mockResolvedValueOnce([
+        {
+          id: 'lookahead',
+          fromPublicKey: PEER.slice(0, 12),
+          toPublicKey: 'self',
+          text: 'oldest',
+          timestamp: 1,
+        },
+        {
+          id: 'visible-older',
+          fromPublicKey: PEER.slice(0, 12),
+          toPublicKey: 'self',
+          text: 'older',
+          timestamp: 2,
+        },
+        {
+          id: 'visible-newer',
+          fromPublicKey: 'self',
+          toPublicKey: PEER,
+          text: 'newer',
+          timestamp: 3,
+        },
+      ]);
+
+      const response = await authenticatedAgent.get(
+        `/api/sources/test-source/meshcore/messages/conversation/${PEER}?limit=2&offset=7`,
+      );
+
+      expect(response.status).toBe(200);
+      expect(meshcoreManager.getConversationMessages).toHaveBeenCalledWith(
+        PEER,
+        3,
+        7,
+      );
+      expect(response.body.hasMore).toBe(true);
+      expect(response.body.data.map((m: { id: string }) => m.id)).toEqual([
+        'visible-older',
+        'visible-newer',
+      ]);
+    });
+
+    it('rejects a non-hex conversation key', async () => {
+      const response = await authenticatedAgent.get(
+        '/api/sources/test-source/meshcore/messages/conversation/not-a-key',
+      );
+
+      expect(response.status).toBe(400);
+      expect(meshcoreManager.getConversationMessages).not.toHaveBeenCalled();
+    });
   });
 
   describe('GET /api/sources/test-source/meshcore/status', () => {

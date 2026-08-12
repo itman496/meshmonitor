@@ -4,7 +4,7 @@
  * Handles MeshCore node and message database operations.
  * Supports SQLite, PostgreSQL, and MySQL through Drizzle ORM.
  */
-import { eq, desc, sql, isNull, isNotNull, and, or, lt, gte, inArray, type SQL } from 'drizzle-orm';
+import { eq, desc, sql, isNull, isNotNull, and, or, lt, gte, inArray, like, ne, type SQL } from 'drizzle-orm';
 import { BaseRepository, DrizzleDatabase } from './base.js';
 import { DatabaseType } from '../types.js';
 import { shouldDiscardPosition } from '../../utils/nullIsland.js';
@@ -820,18 +820,56 @@ export class MeshCoreRepository extends BaseRepository {
   }
 
   /**
-   * Get messages for a specific conversation (to/from a public key)
+   * Get persisted direct messages for one peer, independently of the shared
+   * recent-message pool.
+   *
+   * MeshCore inbound DMs store only the sender's public-key prefix (normally
+   * 12 hex characters), while outbound DMs store the peer's full key. Match
+   * both forms, scope the read to one source, and exclude broadcast/channel
+   * rows plus room posts that happen to name the same author.
+   *
+   * Results are newest-first. `offset` pages further back into this one
+   * conversation for load-older-on-scroll support.
    */
-  async getMessagesForConversation(publicKey: string, limit: number = 50): Promise<DbMeshCoreMessage[]> {
+  async getMessagesForConversation(
+    publicKey: string,
+    limit: number = 100,
+    sourceId: string,
+    offset: number = 0,
+  ): Promise<DbMeshCoreMessage[]> {
+    if (!sourceId) {
+      throw new Error('MeshCoreRepository.getMessagesForConversation requires a sourceId');
+    }
     const { meshcoreMessages } = this.tables;
+    const normalizedKey = publicKey.toLowerCase();
+    const wirePrefix = normalizedKey.slice(0, 12);
+    const peerMatch = or(
+      eq(meshcoreMessages.fromPublicKey, normalizedKey),
+      eq(meshcoreMessages.fromPublicKey, wirePrefix),
+      like(meshcoreMessages.fromPublicKey, `${normalizedKey}%`),
+      eq(meshcoreMessages.toPublicKey, normalizedKey),
+      eq(meshcoreMessages.toPublicKey, wirePrefix),
+      like(meshcoreMessages.toPublicKey, `${normalizedKey}%`),
+    );
+    const conversationMatch = and(
+      isNotNull(meshcoreMessages.toPublicKey),
+      peerMatch,
+      or(
+        isNull(meshcoreMessages.messageType),
+        ne(meshcoreMessages.messageType, 'room_post'),
+      ),
+    );
+    const whereClause = and(
+      eq(meshcoreMessages.sourceId, sourceId),
+      conversationMatch,
+    )!;
     const result = await this.db
       .select()
       .from(meshcoreMessages)
-      .where(
-        sql`${meshcoreMessages.fromPublicKey} = ${publicKey} OR ${meshcoreMessages.toPublicKey} = ${publicKey}`
-      )
+      .where(whereClause)
       .orderBy(desc(meshcoreMessages.timestamp))
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
     return this.normalizeBigInts(result) as unknown as DbMeshCoreMessage[];
   }
 

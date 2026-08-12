@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   MeshCoreMessage, MeshCoreActions, ConnectionStatus, MeshCoreNode,
@@ -12,6 +12,7 @@ import { MeshCoreNodeTelemetryConfig } from './MeshCoreNodeTelemetryConfig';
 import TelemetryGraphs from '../TelemetryGraphs';
 import { useAuth } from '../../contexts/AuthContext';
 import { useSettings } from '../../contexts/SettingsContext';
+import { useCsrfFetch } from '../../hooks/useCsrfFetch';
 import {
   markDmRead,
   loadDmLastRead,
@@ -21,6 +22,7 @@ import {
   isChannelPseudoKey,
 } from './meshcoreUnreadStore';
 import { UiIcon } from '../icons';
+import { compareMeshCoreMessages } from './messageOrder';
 
 interface MeshCoreDirectMessagesViewProps {
   messages: MeshCoreMessage[];
@@ -82,6 +84,7 @@ export const MeshCoreDirectMessagesView: React.FC<MeshCoreDirectMessagesViewProp
 }) => {
   const { t } = useTranslation();
   const { hasPermission } = useAuth();
+  const csrfFetch = useCsrfFetch();
   // Honor the user's Temperature Unit + telemetry time-range settings on the
   // per-node telemetry graph, consistent with the Meshtastic DM view and the
   // MeshCore Telemetry dashboard (#3659).
@@ -96,6 +99,19 @@ export const MeshCoreDirectMessagesView: React.FC<MeshCoreDirectMessagesViewProp
   const [typeFilter, setTypeFilter] = useState<DmTypeFilter>('all');
   const [isCollapsed, setIsCollapsed] = useState<boolean>(false);
   const [mobileShowContent, setMobileShowContent] = useState(false);
+  // Durable backlog for the selected peer, independent of the shared live
+  // message pool. The pool remains the source for real-time updates.
+  const [history, setHistory] = useState<MeshCoreMessage[]>([]);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
+  const historyRef = useRef<MeshCoreMessage[]>([]);
+  historyRef.current = history;
+  // Reject a late response after the operator switches to another peer.
+  const activePeerRef = useRef<string | null>(null);
+  const normalizedSourceId =
+    typeof sourceId === 'string' && sourceId.length > 0 && sourceId !== 'undefined'
+      ? sourceId
+      : '';
 
   useEffect(() => {
     const onResize = () => {
@@ -163,6 +179,91 @@ export const MeshCoreDirectMessagesView: React.FC<MeshCoreDirectMessagesViewProp
     if (a === b) return true;
     return a.startsWith(b) || b.startsWith(a);
   };
+
+  // Fetch the selected peer's newest persisted page. This is what keeps old
+  // DMs visible after a reload even when public-channel traffic has pushed them
+  // out of the global recent-message snapshot.
+  useEffect(() => {
+    if (!normalizedSourceId || !selected) {
+      activePeerRef.current = null;
+      setHistory([]);
+      setHasMoreHistory(false);
+      setLoadingOlderHistory(false);
+      return;
+    }
+
+    let cancelled = false;
+    const peer = selected;
+    activePeerRef.current = peer;
+    setHistory([]);
+    setHasMoreHistory(false);
+    setLoadingOlderHistory(false);
+
+    void (async () => {
+      try {
+        const url = `${baseUrl ?? ''}/api/sources/${encodeURIComponent(normalizedSourceId)}/meshcore/messages/conversation/${encodeURIComponent(peer)}?limit=200`;
+        const response = await csrfFetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (!cancelled && activePeerRef.current === peer) {
+          setHistory(data?.success && Array.isArray(data.data)
+            ? (data.data as MeshCoreMessage[])
+            : []);
+          setHasMoreHistory(Boolean(data?.hasMore));
+        }
+      } catch (err) {
+        if (!cancelled && activePeerRef.current === peer) {
+          console.error('Failed to fetch MeshCore DM history:', err);
+          setHistory([]);
+          setHasMoreHistory(false);
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [baseUrl, normalizedSourceId, selected, csrfFetch, status?.connected]);
+
+  // Load the next older page when MeshCoreMessageStream reports a scroll near
+  // the top. Offset is based only on persisted history, not live-only messages.
+  const loadOlderHistory = useCallback(() => {
+    if (!normalizedSourceId || !selected || loadingOlderHistory || !hasMoreHistory) return;
+    const peer = selected;
+    const offset = historyRef.current.length;
+    setLoadingOlderHistory(true);
+
+    void (async () => {
+      try {
+        const url = `${baseUrl ?? ''}/api/sources/${encodeURIComponent(normalizedSourceId)}/meshcore/messages/conversation/${encodeURIComponent(peer)}?limit=100&offset=${offset}`;
+        const response = await csrfFetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (activePeerRef.current !== peer) return;
+        if (data?.success && Array.isArray(data.data)) {
+          const older = data.data as MeshCoreMessage[];
+          setHistory(prev => {
+            const seen = new Set(prev.map(m => m.id));
+            const fresh = older.filter(m => !seen.has(m.id));
+            return [...fresh, ...prev];
+          });
+          setHasMoreHistory(Boolean(data.hasMore));
+        } else {
+          setHasMoreHistory(false);
+        }
+      } catch (err) {
+        console.error('Failed to load older MeshCore DM history:', err);
+        if (activePeerRef.current === peer) setHasMoreHistory(false);
+      } finally {
+        if (activePeerRef.current === peer) setLoadingOlderHistory(false);
+      }
+    })();
+  }, [
+    baseUrl,
+    normalizedSourceId,
+    selected,
+    csrfFetch,
+    hasMoreHistory,
+    loadingOlderHistory,
+  ]);
 
   // Channel messages carry synthetic `channel-${idx}` keys (see the shared
   // `isChannelPseudoKey` in meshcoreUnreadStore) — they are NOT real DM peers
@@ -264,9 +365,11 @@ export const MeshCoreDirectMessagesView: React.FC<MeshCoreDirectMessagesViewProp
     });
   }, [dmPeers, searchQuery, contactsByKey, typeFilter, messageContentMatchKeys]);
 
+  // Merge the selected peer's DB backlog with live/socket messages. Dedupe
+  // by id and let the live copy win so delivery-status updates stay current.
   const filtered = useMemo(() => {
     if (!selected) return [];
-    return messages.filter(m => {
+    const matchesSelected = (m: MeshCoreMessage): boolean => {
       if (!m.toPublicKey) return false;
       if (m.messageType === 'room_post') return false;
       if (isChannelPseudoKey(m.toPublicKey) || isChannelPseudoKey(m.fromPublicKey)) return false;
@@ -274,8 +377,17 @@ export const MeshCoreDirectMessagesView: React.FC<MeshCoreDirectMessagesViewProp
       if (selfKey && keysMatch(m.toPublicKey, selfKey) && keysMatch(m.fromPublicKey, selected)) return true;
       // No selfKey known — fall back to either direction matching the selected peer.
       return keysMatch(m.fromPublicKey, selected) || keysMatch(m.toPublicKey, selected);
-    });
-  }, [messages, selected, selfKey]);
+    };
+
+    const byId = new Map<string, MeshCoreMessage>();
+    for (const m of history) {
+      if (matchesSelected(m)) byId.set(m.id, m);
+    }
+    for (const m of messages) {
+      if (matchesSelected(m)) byId.set(m.id, m);
+    }
+    return Array.from(byId.values()).sort(compareMeshCoreMessages);
+  }, [history, messages, selected, selfKey]);
 
   // Unread-marker re-read trigger (localStorage isn't reactive) (#3891).
   const [unreadTick, setUnreadTick] = useState(0);
@@ -334,7 +446,8 @@ export const MeshCoreDirectMessagesView: React.FC<MeshCoreDirectMessagesViewProp
   // broadcasts a deletion event so other clients converge.
   const handleDeleteMessage = async (m: MeshCoreMessage) => {
     if (!window.confirm(t('meshcore.confirm_delete_message', 'Delete this message?'))) return;
-    await actions.deleteMessage(m.id);
+    const deleted = await actions.deleteMessage(m.id);
+    if (deleted) setHistory(prev => prev.filter(row => row.id !== m.id));
   };
   const handleClearConversation = async () => {
     if (!selected) return;
@@ -342,7 +455,11 @@ export const MeshCoreDirectMessagesView: React.FC<MeshCoreDirectMessagesViewProp
       'meshcore.confirm_clear_conversation',
       'Clear the entire conversation with this contact? This cannot be undone.',
     ))) return;
-    await actions.clearConversation(selected);
+    const cleared = await actions.clearConversation(selected);
+    if (cleared) {
+      setHistory([]);
+      setHasMoreHistory(false);
+    }
   };
 
   const selectedContactName = selected
@@ -543,6 +660,9 @@ export const MeshCoreDirectMessagesView: React.FC<MeshCoreDirectMessagesViewProp
                   onSend={text => actions.sendMessage(text, selected)}
                   onDeleteMessage={canSend ? handleDeleteMessage : undefined}
                   conversationKey={`dm-${selected}`}
+                  onLoadOlder={loadOlderHistory}
+                  hasMoreOlder={hasMoreHistory}
+                  loadingOlder={loadingOlderHistory}
                   unreadAnchorMs={entryLastRead}
                   maxBytes={150}
                 />
