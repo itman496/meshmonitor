@@ -92,7 +92,28 @@ jobs:
           test "${{ steps.component_tests.outcome }}" = success
 
       - name: Run lint ratchet
-        run: npm run lint:ci
+        id: lint
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run lint:ci 2>&1 | tee lint.log
+
+      - name: Upload lint log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-log-${{ github.run_id }}
+          path: lint.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Enforce lint result
+        if: always()
+        shell: bash
+        run: |
+          echo "lint=${{ steps.lint.outcome }}"
+          test "${{ steps.lint.outcome }}" = success
 
       - name: Type-check production code
         run: npm run typecheck
