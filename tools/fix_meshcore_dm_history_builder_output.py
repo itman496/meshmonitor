@@ -13,15 +13,6 @@ def replace_once(path: str, old: str, new: str) -> None:
     p.write_text(text.replace(old, new, 1))
 
 
-def replace_first(path: str, old: str, new: str) -> None:
-    p = Path(path)
-    text = p.read_text()
-    count = text.count(old)
-    if count < 1:
-        raise RuntimeError(f"{path}: expected at least one match, found {count}")
-    p.write_text(text.replace(old, new, 1))
-
-
 # The first builder version appended the route tests by reopening the file's
 # final brace. Restore that test file and insert the focused describe block at a
 # stable marker inside the existing top-level `describe('MeshCore Routes')`.
@@ -116,10 +107,14 @@ replace_once(
       ? sourceId
       : '';''',
 )
-replace_first(
+replace_once(
     "src/components/MeshCore/MeshCoreDirectMessagesView.tsx",
-    "    if (!sourceId || !selected) {",
-    "    if (!normalizedSourceId || !selected) {",
+    '''  useEffect(() => {
+    if (!sourceId || !selected) {
+      activePeerRef.current = null;''',
+    '''  useEffect(() => {
+    if (!normalizedSourceId || !selected) {
+      activePeerRef.current = null;''',
 )
 replace_once(
     "src/components/MeshCore/MeshCoreDirectMessagesView.tsx",
