@@ -137,4 +137,30 @@ component_path.write_text(
     )
 )
 
-print("Corrected route-test insertion and optional-source guard.")
+# Drizzle's `and()` return type includes undefined even though sourceId is a
+# required first condition here. Assert the constructed predicate once before
+# handing it to `.where()`.
+replace_once(
+    "src/db/repositories/meshcore.ts",
+    '''    const whereClause = and(
+      eq(meshcoreMessages.sourceId, sourceId),
+      conversationMatch,
+    );''',
+    '''    const whereClause = and(
+      eq(meshcoreMessages.sourceId, sourceId),
+      conversationMatch,
+    )!;''',
+)
+
+# The DB row is source-scoped by the query, but the column is nullable for
+# legacy rows. Preserve the manager's required sourceId contract in the UI
+# shape by falling back to the active manager source.
+replace_once(
+    "src/server/meshcoreManager.ts",
+    '''      sourceId: dbMsg.sourceId ?? undefined,
+      messageType: dbMsg.messageType ?? undefined,''',
+    '''      sourceId: dbMsg.sourceId ?? this.sourceId,
+      messageType: dbMsg.messageType ?? undefined,''',
+)
+
+print("Corrected route-test insertion, source guard, and production types.")
