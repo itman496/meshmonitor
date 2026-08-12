@@ -44,12 +44,52 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Run focused regression tests
-        run: >-
-          npx vitest run
-          src/db/repositories/meshcore.conversationHistory.test.ts
-          src/server/routes/meshcoreRoutes.test.ts
-          src/components/MeshCore/MeshCoreDirectMessagesView.test.tsx
+      - name: Run repository regression tests
+        id: repo_tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npx vitest run src/db/repositories/meshcore.conversationHistory.test.ts 2>&1 | tee repository-tests.log
+
+      - name: Run API route regression tests
+        id: route_tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npx vitest run src/server/routes/meshcoreRoutes.test.ts 2>&1 | tee route-tests.log
+
+      - name: Run DM component regression tests
+        id: component_tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npx vitest run src/components/MeshCore/MeshCoreDirectMessagesView.test.tsx 2>&1 | tee component-tests.log
+
+      - name: Upload focused test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: focused-test-logs-${{ github.run_id }}
+          path: |
+            repository-tests.log
+            route-tests.log
+            component-tests.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Enforce focused regression test results
+        if: always()
+        shell: bash
+        run: |
+          echo "repository=${{ steps.repo_tests.outcome }}"
+          echo "routes=${{ steps.route_tests.outcome }}"
+          echo "component=${{ steps.component_tests.outcome }}"
+          test "${{ steps.repo_tests.outcome }}" = success
+          test "${{ steps.route_tests.outcome }}" = success
+          test "${{ steps.component_tests.outcome }}" = success
 
       - name: Run lint ratchet
         run: npm run lint:ci
