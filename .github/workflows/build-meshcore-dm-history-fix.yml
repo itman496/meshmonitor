@@ -7,6 +7,7 @@ on:
     paths:
       - tools/apply_meshcore_dm_history_fix.py
       - tools/fix_meshcore_dm_history_builder_output.py
+      - tools/fix_meshcore_dm_history_lint.py
       - .github/workflows/build-meshcore-dm-history-fix.yml
   workflow_dispatch:
 
@@ -34,6 +35,7 @@ jobs:
         run: |
           python3 tools/apply_meshcore_dm_history_fix.py
           python3 tools/fix_meshcore_dm_history_builder_output.py
+          python3 tools/fix_meshcore_dm_history_lint.py
 
       - name: Normalize generated test whitespace
         run: sed -i 's/[[:blank:]]\+$//' src/server/routes/meshcoreRoutes.test.ts
@@ -130,6 +132,7 @@ jobs:
         run: |
           rm tools/apply_meshcore_dm_history_fix.py
           rm tools/fix_meshcore_dm_history_builder_output.py
+          rm tools/fix_meshcore_dm_history_lint.py
           rm .github/workflows/build-meshcore-dm-history-fix.yml
           git restore package-lock.json
           git diff --check
