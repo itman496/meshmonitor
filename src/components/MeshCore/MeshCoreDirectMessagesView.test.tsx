@@ -25,6 +25,7 @@ vi.mock('../../contexts/AuthContext', () => ({
 
 vi.mock('../../contexts/SettingsContext', () => ({
   useSettings: () => ({ timeFormat: '24', dateFormat: 'MM/DD/YYYY', temperatureUnit: 'F', telemetryVisualizationHours: 48 }),
+  useSettingsOptional: () => ({ linkPreviewsEnabled: false }),
 }));
 
 const csrfFetchMock = vi.fn();
@@ -124,7 +125,9 @@ const messages: MeshCoreMessage[] = [];
 
 beforeEach(() => {
   csrfFetchMock.mockReset();
-  csrfFetchMock.mockResolvedValue(
+  // Return a fresh Response for each request: selecting a real peer now loads
+  // both conversation history and telemetry configuration.
+  csrfFetchMock.mockImplementation(() => Promise.resolve(
     new Response(
       JSON.stringify({
         success: true,
@@ -132,7 +135,7 @@ beforeEach(() => {
       }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     ),
-  );
+  ));
 });
 
 describe('MeshCoreDirectMessagesView — per-node telemetry-config panel', () => {
@@ -156,11 +159,13 @@ describe('MeshCoreDirectMessagesView — per-node telemetry-config panel', () =>
     });
 
     // Panel made its GET against the per-node telemetry-config endpoint.
+    // The conversation-history request may race it, so find the matching call
+    // instead of assuming it is always call zero.
     expect(csrfFetchMock).toHaveBeenCalled();
-    const calledUrl = csrfFetchMock.mock.calls[0][0] as string;
-    expect(calledUrl).toContain('/api/sources/src-a/meshcore/nodes/');
-    expect(calledUrl).toContain(REAL_PK);
-    expect(calledUrl).toContain('/telemetry-config');
+    const calledUrls = csrfFetchMock.mock.calls.map(call => call[0] as string);
+    const telemetryUrl = calledUrls.find(url => url.includes('/telemetry-config'));
+    expect(telemetryUrl).toContain('/api/sources/src-a/meshcore/nodes/');
+    expect(telemetryUrl).toContain(REAL_PK);
   });
 
   it('does NOT render the telemetry-retrieval panel when sourceId is not provided (singleton mode)', () => {
@@ -200,7 +205,8 @@ describe('MeshCoreDirectMessagesView — per-node telemetry-config panel', () =>
     fireEvent.click(screen.getByText('Prefix Pete'));
 
     expect(screen.queryByText('Telemetry Retrieval')).toBeNull();
-    expect(csrfFetchMock).not.toHaveBeenCalled();
+    const urls = csrfFetchMock.mock.calls.map(call => call[0] as string);
+    expect(urls.some(url => url.includes('/telemetry-config'))).toBe(false);
   });
 
   it('mounts the TelemetryGraphs component with the selected pubkey when sourceId is set', async () => {
@@ -712,5 +718,111 @@ describe('MeshCoreDirectMessagesView — receive-only mode (#4547 Phase 2 WP3)',
     const input = screen.getByPlaceholderText('Type a message…');
     expect(input).not.toBeDisabled();
     expect(input).not.toHaveAttribute('title');
+  });
+});
+
+describe('MeshCoreDirectMessagesView — persisted DM history pagination', () => {
+  const telemetryResponse = () => new Response(
+    JSON.stringify({
+      success: true,
+      data: { enabled: false, intervalMinutes: 60, lastRequestAt: null },
+    }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  );
+
+  it('loads the selected conversation from durable history even when the live pool is empty', async () => {
+    const persisted: MeshCoreMessage = {
+      id: 'persisted-1',
+      fromPublicKey: REAL_PK.slice(0, 12),
+      toPublicKey: makeStatus().localNode?.publicKey,
+      text: 'persisted hello',
+      timestamp: 1000,
+      receivedAt: 1001,
+    };
+    csrfFetchMock.mockImplementation((url: string) => {
+      if (url.includes('/messages/conversation/')) {
+        return Promise.resolve(new Response(
+          JSON.stringify({ success: true, data: [persisted], hasMore: false }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ));
+      }
+      return Promise.resolve(telemetryResponse());
+    });
+
+    render(
+      <MeshCoreDirectMessagesView
+        messages={[]}
+        contacts={[realContact]}
+        status={makeStatus()}
+        actions={makeActions()}
+        baseUrl=""
+        sourceId="src-a"
+      />,
+    );
+
+    fireEvent.click(screen.getByText('Remote Bob'));
+
+    expect(await screen.findByText('persisted hello')).toBeTruthy();
+    const urls = csrfFetchMock.mock.calls.map(call => call[0] as string);
+    expect(urls.some(url =>
+      url.includes(`/meshcore/messages/conversation/${REAL_PK}`)
+      && url.includes('limit=200'),
+    )).toBe(true);
+  });
+
+  it('loads and prepends an older page when the message list is scrolled to the top', async () => {
+    const recent: MeshCoreMessage = {
+      id: 'recent',
+      fromPublicKey: REAL_PK.slice(0, 12),
+      toPublicKey: makeStatus().localNode?.publicKey,
+      text: 'recent persisted message',
+      timestamp: 2000,
+      receivedAt: 2001,
+    };
+    const older: MeshCoreMessage = {
+      id: 'older',
+      fromPublicKey: makeStatus().localNode?.publicKey ?? '',
+      toPublicKey: REAL_PK,
+      text: 'older persisted message',
+      timestamp: 1000,
+      receivedAt: 1001,
+    };
+    csrfFetchMock.mockImplementation((url: string) => {
+      if (url.includes('/messages/conversation/')) {
+        const body = url.includes('offset=1')
+          ? { success: true, data: [older], hasMore: false }
+          : { success: true, data: [recent], hasMore: true };
+        return Promise.resolve(new Response(
+          JSON.stringify(body),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ));
+      }
+      return Promise.resolve(telemetryResponse());
+    });
+
+    const { container } = render(
+      <MeshCoreDirectMessagesView
+        messages={[]}
+        contacts={[realContact]}
+        status={makeStatus()}
+        actions={makeActions()}
+        baseUrl=""
+        sourceId="src-a"
+      />,
+    );
+
+    fireEvent.click(screen.getByText('Remote Bob'));
+    expect(await screen.findByText('recent persisted message')).toBeTruthy();
+
+    const list = container.querySelector('.meshcore-message-list') as HTMLElement;
+    fireEvent.scroll(list);
+
+    expect(await screen.findByText('older persisted message')).toBeTruthy();
+    expect(screen.getByText('recent persisted message')).toBeTruthy();
+    const urls = csrfFetchMock.mock.calls.map(call => call[0] as string);
+    expect(urls.some(url =>
+      url.includes(`/meshcore/messages/conversation/${REAL_PK}`)
+      && url.includes('offset=1'),
+    )).toBe(true);
   });
 });

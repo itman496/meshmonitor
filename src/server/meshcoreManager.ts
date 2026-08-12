@@ -6208,6 +6208,45 @@ class MeshCoreManager extends EventEmitter implements ISourceManager {
   }
 
   /**
+   * Per-conversation DM backlog, queried straight from the DB so a busy public
+   * channel cannot evict a quiet conversation from the visible history.
+   * Returns oldest-first to match the message stream.
+   *
+   * `offset` pages further back into this conversation for infinite scroll.
+   */
+  async getConversationMessages(
+    publicKey: string,
+    limit: number = 100,
+    offset: number = 0,
+  ): Promise<MeshCoreMessage[]> {
+    const stored = await databaseService.meshcore.getMessagesForConversation(
+      publicKey,
+      limit,
+      this.sourceId,
+      offset,
+    );
+    // DB returns newest-first; reverse to oldest-first for the UI.
+    return stored.reverse().map(dbMsg => ({
+      id: dbMsg.id,
+      fromPublicKey: dbMsg.fromPublicKey,
+      fromName: dbMsg.fromName ?? undefined,
+      toPublicKey: dbMsg.toPublicKey ?? undefined,
+      text: dbMsg.text,
+      timestamp: dbMsg.timestamp,
+      rssi: dbMsg.rssi ?? undefined,
+      snr: dbMsg.snr ?? undefined,
+      sourceId: dbMsg.sourceId ?? this.sourceId,
+      messageType: dbMsg.messageType ?? undefined,
+      // The DB's createdAt is our own observation clock, matching receivedAt.
+      receivedAt: dbMsg.createdAt ?? undefined,
+      hopCount: dbMsg.hopCount ?? null,
+      routePath: dbMsg.routePath ?? null,
+      scopeCode: dbMsg.scopeCode ?? null,
+      scopeName: dbMsg.scopeName ?? null,
+    }));
+  }
+
+  /**
    * Per-channel message backlog, queried straight from the DB so each channel
    * gets its own history independent of the shared in-memory pool and the
    * global recent-tail that {@link getRecentMessages} serves. Returns

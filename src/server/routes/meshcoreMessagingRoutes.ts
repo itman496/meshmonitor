@@ -102,6 +102,63 @@ router.get('/messages/channel/:idx', optionalAuth(), requireMeshcoreChannelAcces
 });
 
 /**
+ * GET /api/meshcore/messages/conversation/:publicKey
+ * Per-conversation DM backlog. Unlike /messages (a global recent tail shared
+ * by every channel and DM), this reads the selected peer's durable history.
+ *
+ * Supports `offset` for infinite-scroll pagination. `publicKey` may be a
+ * 12-character wire prefix or a full 64-character key because inbound DMs
+ * are stored by prefix.
+ */
+router.get(
+  '/messages/conversation/:publicKey',
+  optionalAuth(),
+  requirePermission('messages', 'read', { sourceIdFrom: 'params.id' }),
+  async (req: Request, res: Response) => {
+    try {
+      const publicKey = String(req.params.publicKey || '').toLowerCase();
+      if (!/^[0-9a-f]{12,64}$/.test(publicKey)) {
+        return res.status(400).json({
+          success: false,
+          error: 'publicKey must be a 12-64 character hex string',
+        });
+      }
+      let limit = parseInt(req.query.limit as string || '100', 10);
+      if (isNaN(limit) || limit < 1) {
+        limit = 100;
+      } else if (limit > VALIDATION.MAX_MESSAGE_LIMIT) {
+        limit = VALIDATION.MAX_MESSAGE_LIMIT;
+      }
+      let offset = parseInt(req.query.offset as string || '0', 10);
+      if (isNaN(offset) || offset < 0) {
+        offset = 0;
+      } else if (offset > VALIDATION.MAX_MESSAGE_OFFSET) {
+        offset = VALIDATION.MAX_MESSAGE_OFFSET;
+      }
+
+      // The manager returns oldest-first. Fetch one lookahead row; after the
+      // reverse, that extra oldest row is index 0 and is removed from this page.
+      const page = await managerFor(req, res).getConversationMessages(
+        publicKey,
+        limit + 1,
+        offset,
+      );
+      const hasMore = page.length > limit;
+      const messages = hasMore ? page.slice(1) : page;
+      res.json({
+        success: true,
+        data: messages,
+        count: messages.length,
+        hasMore,
+      });
+    } catch (error) {
+      logger.error('[API] Error getting MeshCore conversation messages:', error);
+      res.status(500).json({ success: false, error: 'Failed to get conversation messages' });
+    }
+  },
+);
+
+/**
  * GET /api/meshcore/messages/channel-counts?channels=0,1,2
  * Total persisted message count per channel index, for the channel-list badges.
  * Accurate per channel (not the capped in-memory pool). Also returns the latest
