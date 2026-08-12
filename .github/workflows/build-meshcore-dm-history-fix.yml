@@ -1,0 +1,73 @@
+name: Build and test MeshCore DM history fix
+
+on:
+  push:
+    branches:
+      - fix/meshcore-dm-history-pagination
+    paths:
+      - tools/apply_meshcore_dm_history_fix.py
+      - .github/workflows/build-meshcore-dm-history-fix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+
+      - name: Apply guarded source and test changes
+        run: python3 tools/apply_meshcore_dm_history_fix.py
+
+      - name: Check patch whitespace
+        run: git diff --check
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Run focused regression tests
+        run: >-
+          npx vitest run
+          src/db/repositories/meshcore.conversationHistory.test.ts
+          src/server/routes/meshcoreRoutes.test.ts
+          src/components/MeshCore/MeshCoreDirectMessagesView.test.tsx
+
+      - name: Run lint ratchet
+        run: npm run lint:ci
+
+      - name: Type-check production code
+        run: npm run typecheck
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build server
+        run: npm run build:server
+
+      - name: Commit the tested implementation
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          rm tools/apply_meshcore_dm_history_fix.py
+          rm .github/workflows/build-meshcore-dm-history-fix.yml
+          git restore package-lock.json
+          git diff --check
+          git config user.name "itman496"
+          git config user.email "1369216+itman496@users.noreply.github.com"
+          git add -A
+          git diff --cached --stat
+          git commit -m "fix(meshcore): paginate direct message history"
+          git push origin "HEAD:${BRANCH_NAME}"
